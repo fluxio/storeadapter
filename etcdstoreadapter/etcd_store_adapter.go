@@ -1,6 +1,7 @@
 package etcdstoreadapter
 
 import (
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -316,7 +317,9 @@ func (adapter *ETCDStoreAdapter) dispatchWatchEvents(key string, events chan<- s
 	for {
 		response, err := adapter.client.Watch(key, index, true, nil, stop)
 		if err != nil {
-			if adapter.isEventIndexClearedError(err) {
+			if _, ok := err.(*json.SyntaxError); ok {
+				continue
+			} else if adapter.isEventIndexClearedError(err) {
 				index = 0
 				continue
 			} else if err == etcd.ErrWatchStoppedByUser {
