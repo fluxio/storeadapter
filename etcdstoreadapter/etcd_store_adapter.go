@@ -1,7 +1,7 @@
 package etcdstoreadapter
 
 import (
-	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -314,24 +314,36 @@ func (adapter *ETCDStoreAdapter) dispatchWatchEvents(key string, events chan<- s
 	defer close(errors)
 	defer adapter.unregisterInflightWatch(stop)
 
-	for {
+	const maxerrors = 1000
+	errorCount := 0
+
+	// We want to try to avoid exiting this and closing the channels unless
+	// there's a really critical error.  It seems like the recent versions of
+	// etcd (or the etcd client) are returning sporatic, spurious errors from
+	// the Watch command.  So we simply notify of the errors and continue on.
+	// In the case of a severe failure (e.g. network is down), this will
+	// eventually hit 1000 and shutdown.
+	for errorCount < maxerrors {
 		response, err := adapter.client.Watch(key, index, true, nil, stop)
 		if err != nil {
-			if _, ok := err.(*json.SyntaxError); ok {
-				continue
-			} else if adapter.isEventIndexClearedError(err) {
+			if adapter.isEventIndexClearedError(err) {
 				index = 0
 				continue
 			} else if err == etcd.ErrWatchStoppedByUser {
 				return
 			} else {
 				errors <- adapter.convertError(err)
-				return
+				errorCount++
+				continue
 			}
 		}
 
 		events <- adapter.makeWatchEvent(response)
 		index = response.Node.ModifiedIndex + 1
+	}
+
+	if errorCount == maxerrors {
+		errors <- fmt.Errorf("Too many errors (%d), exiting watch loop.", errorCount)
 	}
 }
 
