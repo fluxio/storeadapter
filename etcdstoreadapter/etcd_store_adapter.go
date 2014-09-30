@@ -9,6 +9,7 @@ import (
 	"github.com/cloudfoundry/storeadapter/workerpool"
 	"github.com/coreos/go-etcd/etcd"
 	"github.com/nu7hatch/gouuid"
+	"github.com/paulbellamy/ratecounter"
 )
 
 type ETCDStoreAdapter struct {
@@ -314,16 +315,16 @@ func (adapter *ETCDStoreAdapter) dispatchWatchEvents(key string, events chan<- s
 	defer close(errors)
 	defer adapter.unregisterInflightWatch(stop)
 
-	const maxerrors = 1000
-	errorCount := 0
+	const maxErrorsPerMinute = 100
+	recentErrors := ratecounter.NewRateCounter(time.Minute)
 
 	// We want to try to avoid exiting this and closing the channels unless
 	// there's a really critical error.  It seems like the recent versions of
 	// etcd (or the etcd client) are returning sporatic, spurious errors from
 	// the Watch command.  So we simply notify of the errors and continue on.
 	// In the case of a severe failure (e.g. network is down), this will
-	// eventually hit 1000 and shutdown.
-	for errorCount < maxerrors {
+	// spin and rapidly spew more than 100 errors in a minute and shutdown.
+	for recentErrors.Rate() < maxErrorsPerMinute {
 		response, err := adapter.client.Watch(key, index, true, nil, stop)
 		if err != nil {
 			if adapter.isEventIndexClearedError(err) {
@@ -333,7 +334,7 @@ func (adapter *ETCDStoreAdapter) dispatchWatchEvents(key string, events chan<- s
 				return
 			} else {
 				errors <- adapter.convertError(err)
-				errorCount++
+				recentErrors.Mark()
 				continue
 			}
 		}
@@ -342,9 +343,7 @@ func (adapter *ETCDStoreAdapter) dispatchWatchEvents(key string, events chan<- s
 		index = response.Node.ModifiedIndex + 1
 	}
 
-	if errorCount == maxerrors {
-		errors <- fmt.Errorf("Too many errors (%d), exiting watch loop.", errorCount)
-	}
+	errors <- fmt.Errorf("Too many errors/min (%d), exiting watch loop.", recentErrors.Rate())
 }
 
 func (adapter *ETCDStoreAdapter) registerInflightWatch(stop chan bool) {
